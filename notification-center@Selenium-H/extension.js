@@ -1,9 +1,13 @@
 
 /*
-Version 21.02
+Version 22.00
 =============
 
 */
+
+const Util = imports.misc.util;
+const GLib = imports.gi.GLib;
+const MessageTray = imports.ui.messageTray;
 
 const Config      = imports.misc.config;
 const Gettext     = imports.gettext;
@@ -22,6 +26,9 @@ const St          = imports.gi.St;
 const _           = imports.gettext.domain("notification-center").gettext;
 
 let notificationCenter = null;
+let [res, out, err, status] = [];
+
+const spotifyDir = GLib.get_home_dir() + "/.cache/spotify/Gnome/";
 
 function enable() {
 
@@ -93,7 +100,7 @@ const NotificationCenter = new Lang.Class({
     this.eventsIcon  = new St.Icon({icon_name: "x-office-calendar-symbolic",style_class:'system-status-icon',visible:false});
     this.eventsLabel = new St.Label({ text: "• ",visible:false});
     
-    this.mediaIcon = new St.Icon({icon_name : "audio-x-generic-symbolic",style_class:'system-status-icon',visible:false});
+    this.mediaIcon = new St.Icon({icon_name : "audio-x-generic-symbolic",style_class:'system-status-icon',visible:true});
     
     this.notificationIcon  = new St.Icon({style_class:'system-status-icon',visible:false});
     this.notificationLabel = new St.Label({ text: "• ",visible:false});
@@ -121,6 +128,8 @@ const NotificationCenter = new Lang.Class({
     
     this.panelButtonActor = (Config.PACKAGE_VERSION < "3.34") ? this.actor : this;
     this.panelButtonActor.add_style_class_name('notification-center-panel-button');
+    
+    this._cover = "";
     
   },
 
@@ -268,8 +277,9 @@ const NotificationCenter = new Lang.Class({
       Meta.KeyBindingFlags.NONE,
       Shell.ActionMode.NORMAL | Shell.ActionMode.OVERVIEW,
       () => {
-        this.notificationIcon.visible = !(this.mediaIcon.visible || this.eventsIcon.visible);
-        this.panelButtonActor.visible = !this.panelButtonActor.visible ;
+        this.menu.open();
+//        this.notificationIcon.visible = !(this.mediaIcon.visible || this.eventsIcon.visible);
+//        this.panelButtonActor.visible = !this.panelButtonActor.visible ;
       }
     );
 
@@ -344,6 +354,13 @@ const NotificationCenter = new Lang.Class({
                                     (this.mediaSection._shouldShow() && this.mediaSectionToBeShown && !this.showThreeIcons) ||
                                     ((this.shouldShowEventsSection()) && this.eventsSectionToBeShown && !this.showThreeIcons)||
                                     ((!this.isDndOff)*this.autohide > 1);
+
+    // XXX
+    if(this.mediaIcon.visible && this.notificationIcon.visible) {
+        this.notificationIcon.style = 'padding: 0 4px 0 8px;';
+    } else {
+        this.notificationIcon.style = 'padding: 0 4px;';
+    }
 
     if(this.mediaIcon.visible || this.eventsIcon.visible || this.notificationIcon.visible || !this.autohide) {
       this.panelButtonActor.visible = true;
@@ -597,7 +614,7 @@ const NotificationCenter = new Lang.Class({
   },
 
   seen: function() {
-
+  
     if(!this.menu.isOpen) {
       this.resetIndicator();
       return ;
@@ -629,7 +646,7 @@ const NotificationCenter = new Lang.Class({
 
   setNotificationIconName: function () {
     if(Gtk.IconTheme.get_default()) {
-    this.notificationIconName = Gtk.IconTheme.get_default().has_icon("notification-symbolic")?"notification-symbolic":"preferences-system-notifications-symbolic";
+      this.notificationIconName = "user-available-panel";
     }
     else {
       this.notificationIconName = "preferences-system-notifications-symbolic";
@@ -668,7 +685,7 @@ const NotificationCenter = new Lang.Class({
     this.iconThemeChangeSig = this.textureCache.connect('icon-theme-changed', this.iconThemeChanged.bind(this));
 
     this.panelButtonActor.add_child(this._indicator);
-    Main.panel.addToStatusArea("NotificationCenter", this, this.prefs.get_int('indicator-index'), this.prefs.get_string('indicator-pos'));
+    Main.panel.addToStatusArea("NotificationCenter", this, this.prefs.get_int('indicator-index'), this.prefs.get_string('indicator-pos'));  // XXX XXX XXX
 
     this.rebuildMessageList();
     this.arrangeItems(this.prefs.get_enum("dnd-position"));
@@ -681,7 +698,10 @@ const NotificationCenter = new Lang.Class({
     this.removeDotAndBorderFromDateMenu();
     this.indicatorViewShortcut();
 
-    this.menu.connect("open-state-changed",()=>this.seen());
+    this.menu.connect("open-state-changed",()=> {
+        this.seen();
+        this._refresh();
+    });
 
     this.dndSig = this.dndpref.connect("changed::show-banners", () => {
       this.loadDndStatus();
@@ -822,7 +842,156 @@ const NotificationCenter = new Lang.Class({
     this.prefs.disconnect(this.reloadProfilesSignal);
 
   },
+  
+	//Defind the refreshing function and set the timeout in seconds
+	_refresh: function () {
+		this._removeTimeout();
+		if (this.menu.isOpen) {
+	        if (this.mediaIcon.visible) {
+		        this._loadData();
+		    }
+		    this._timeout = Mainloop.timeout_add_seconds(1, Lang.bind(this, this._refresh));
+		}
+	},
 
+  	_loadData: function () {
+		
+		// Use GLib to send a dbus request with the expectation of receiving an MPRIS v2 response.
+		try {
+			[res, out, err, status] = GLib.spawn_command_line_sync(
+			    "dbus-send --print-reply --dest=org.mpris.MediaPlayer2.spotify\
+			     /org/mpris/MediaPlayer2 org.freedesktop.DBus.Properties.Get\
+			     string:org.mpris.MediaPlayer2.Player string:Metadata");
+		} catch (err) {
+			return;
+		}
+		if (out.toString() == "") {
+			GLib.spawn_command_line_sync("rm " + spotifyDir+"cover.jpg");
+			return;
+		}
+		
+		var coverCurrent = parseSpotifyData(out.toString());
+		
+		if (coverCurrent != this._cover) {
+//            Main.notify(_("update"));
+		    this._cover = coverCurrent;
+		    this._coverDir = this._cover.substring(38, 40) + "/";
+            
+            [res, out, err, status] = GLib.spawn_command_line_sync(
+                "cp " + spotifyDir+this._coverDir+this._cover + ' ' + spotifyDir+"cover.jpg");
+            if (status) {
+	            try {
+//                    Main.notify(_("Loading..."));
+                    GLib.spawn_command_line_sync("wget https://i.scdn.co/image/"+this._cover + " -O " + spotifyDir+"cover.jpg");
+	                GLib.spawn_command_line_sync("mkdir " + spotifyDir+this._coverDir);
+                    GLib.spawn_command_line_sync("cp " + spotifyDir+"cover.jpg " + spotifyDir+this._coverDir+this._cover);
+	            } catch (err) {
+		            return;
+	            }
+	        }
+	        
+//		    notify("MyApp", "Test", spotifyDir+"cover.jpg");
+		}
+
+	},
+	
+  	_removeTimeout: function () {
+		if (this._timeout) {
+			Mainloop.source_remove(this._timeout);
+			this._timeout = null;
+		}
+	},
+  
 });
 
+function parseSpotifyData(data) {
+	if(!data)
+		return ("Errorr 404");
+
+    var cover = data.substring(data.indexOf("mpris:artUrl"));
+	cover = cover.split("/")[4]
+	cover = cover.split("\"")[0]
+
+  	return (cover);
+}
+
+function notify(msg, details, icon) {
+    let source = new MessageTray.Source("MyApp Information", icon);
+    Main.messageTray.add(source);
+    let notification = new MessageTray.Notification(source, msg, details);
+    notification.setTransient(true);
+    source.notify(notification);
+}
+
+// XXX XXX XXX XXX XXX XXX XXX XXX XXX XXX XXX XXX XXX XXX XXX XXX XXX XXX XXX XXX XXX XXX
+
+let styleLine = "";
+
+function overrideStyle(actor, secondTime) {
+    // it could be that the first child has the right style class name.
+    if (!actor.has_style_class_name || !actor.has_style_class_name('panel-button')) {
+        if (secondTime) {
+            // if we've already recursed once, then give up (we will only look
+            // one level down to find the 'panel-button' actor).
+            return;
+        }
+        let child = actor.get_children();
+        if (child.length) {
+            overrideStyle(child[0], true);
+        }
+        return;
+    }
+
+    if (actor._original_inline_style_ === undefined) {
+        actor._original_inline_style_ = actor.get_style();
+    }
+    actor.set_style(styleLine + '; ' + (actor._original_inline_style_ || ''));
+    /* listen for the style being set externally so we can re-apply our style */
+    // TODO: somehow throttle the number of calls to this - add a timeout with
+    // a flag?
+    if (!actor._statusAreaHorizontalSpacingSignalID) {
+        actor._statusAreaHorizontalSpacingSignalID =
+            actor.connect('style-changed', function () {
+                let currStyle = actor.get_style();
+                if (currStyle && !currStyle.match(styleLine)) {
+                    // re-save the style (if it has in fact changed)
+                    actor._original_inline_style_ = currStyle;
+                    // have to do this or else the overrideStyle call will trigger
+                    // another call of this, firing an endless series of these signals.
+                    // TODO: a ._style_pending which prevents it rather than disconnect/connect?
+                    actor.disconnect(actor._statusAreaHorizontalSpacingSignalID);
+                    delete actor._statusAreaHorizontalSpacingSignalID;
+                    overrideStyle(actor);
+                }
+            });
+    }
+
+    // thanks to https://github.com/home-sweet-gnome/dash-to-panel/commit/d372e6abd393b8f1c0e791b043dc2283b41d3ffb
+    if (actor.visible && imports.misc.config.PACKAGE_VERSION >= '3.34.0') {
+        //force gnome 3.34 to refresh (having problem with the -natural-hpadding)
+        actor.hide();
+        Mainloop.idle_add(() => actor.show());
+    }
+}
+
+function applyStyles() {
+    styleLine = '-natural-hpadding: %dpx'.format(padding);
+    // if you set it below 6 and it looks funny, that's your fault!
+    if (padding < 6) {
+        styleLine += '; -minimum-hpadding: %dpx'.format(padding);
+    }
+
+    /* set style for everything in _rightBox */
+    let children = Main.panel._rightBox.get_children();
+    for (let i = 0; i < children.length; ++i) {
+        overrideStyle(children[i]);
+    }
+
+    /* connect signal */
+    actorAddedID = Main.panel._rightBox.connect('actor-added',
+        function (container, actor) {
+            overrideStyle(actor);
+        }
+    );
+}
 
